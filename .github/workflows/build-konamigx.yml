@@ -1,17 +1,22 @@
 name: Build Konami System GX MAME (Linux x86_64)
+
 on:
   workflow_dispatch:
+
 permissions:
   contents: read
+
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+
     env:
       MAME_REF: mame0289
       BUNDLE: konami-gx-mame-linux-x86_64
       SDL_AUDIODRIVER: dummy
       SDL_VIDEODRIVER: dummy
+
     steps:
       - name: Fetch MAME 0.289
         uses: actions/checkout@v4
@@ -21,6 +26,7 @@ jobs:
           path: mame-src
           fetch-depth: 1
           persist-credentials: false
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -31,66 +37,203 @@ jobs:
           gcc --version
           df -h
           free -h
+
       - name: Build System GX driver
         working-directory: mame-src
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p "$GITHUB_WORKSPACE/diagnostics"
+
           git rev-parse HEAD | tee "$GITHUB_WORKSPACE/diagnostics/mame_commit.txt"
+
           printf '%s\n' "$MAME_REF" > "$GITHUB_WORKSPACE/diagnostics/mame_ref.txt"
+
           make -j2 SUBTARGET=konamigxmame \
-            SOURCES=src/mame/konami/konamigx.cpp REGENIE=1 \
-            USE_QTDEBUG=0 SYMBOLS=0 TOOLS=0 ARCHOPTS=-U_FORTIFY_SOURCE \
+            SOURCES=src/mame/konami/konamigx.cpp \
+            REGENIE=1 \
+            USE_QTDEBUG=0 \
+            SYMBOLS=0 \
+            TOOLS=0 \
+            ARCHOPTS=-U_FORTIFY_SOURCE \
             2>&1 | tee "$GITHUB_WORKSPACE/diagnostics/build.log"
+
           test -x konamigxmame
+
       - name: Package binary, resources and libraries
         shell: bash
         run: |
           set -euo pipefail
+
           out="$GITHUB_WORKSPACE/$BUNDLE"
+
           mkdir -p "$out/lib" "$out/diagnostics" "$out/source"
+
           cp mame-src/konamigxmame "$out/"
           cp mame-src/COPYING mame-src/README.md "$out/"
+
           for d in bgfx plugins language artwork hash; do
-            if [ -d "mame-src/$d" ]; then cp -a "mame-src/$d" "$out/"; fi
+            if [ -d "mame-src/$d" ]; then
+              cp -a "mame-src/$d" "$out/"
+            fi
           done
-          for f in src/mame/konami/konamigx.cpp src/mame/konami/konamigx.h \
-                   src/devices/sound/k054539.cpp src/devices/sound/k054539.h \
-                   src/devices/cpu/tms57002/tms57002.cpp src/devices/cpu/tms57002/tms57002.h; do
+
+          for f in \
+            src/mame/konami/konamigx.cpp \
+            src/mame/konami/konamigx.h \
+            src/devices/sound/k054539.cpp \
+            src/devices/sound/k054539.h \
+            src/devices/cpu/tms57002/tms57002.cpp \
+            src/devices/cpu/tms57002/tms57002.h; do
+
             if [ -f "mame-src/$f" ]; then
               mkdir -p "$out/source/$(dirname "$f")"
               cp "mame-src/$f" "$out/source/$f"
             fi
+
           done
+
           cp diagnostics/* "$out/diagnostics/"
+
           file "$out/konamigxmame" > "$out/diagnostics/file.txt"
+
           ldd "$out/konamigxmame" | tee "$out/diagnostics/ldd-original.txt"
+
           # Do not bundle glibc or its dynamic loader.
+
           while IFS= read -r f; do
             case "$(basename "$f")" in
-              ld-linux*|libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|libresolv.so.*|libutil.so.*|libnss_*) continue ;;
+              ld-linux*|libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*|libresolv.so.*|libutil.so.*|libnss_*)
+                continue
+                ;;
             esac
+
             cp -L "$f" "$out/lib/$(basename "$f")"
-          done < <(awk '$2 == "=>" && $3 ~ /^\// {print $3}' "$out/diagnostics/ldd-original.txt" | sort -u)
+
+          done < <(
+            awk '$2 == "=>" && $3 ~ /^\// {print $3}' \
+              "$out/diagnostics/ldd-original.txt" | sort -u
+          )
+
           cat > "$out/run-mame.sh" <<'SH'
           #!/usr/bin/env bash
           set -e
+
           HERE="$(cd "$(dirname "$0")" && pwd)"
+
           export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           export SDL_AUDIODRIVER="${SDL_AUDIODRIVER:-dummy}"
           export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}"
+
           cd "$HERE"
+
           exec "$HERE/konamigxmame" "$@"
           SH
+
           chmod +x "$out/run-mame.sh"
+
           cat > "$out/README.txt" <<'TXT'
           Konami System GX MAME 0.289 Linux x86_64
+
           Driver: src/mame/konami/konamigx.cpp
-          Usage: ./run-mame.sh -version
-                 ./run-mame.sh -listxml salmndr2
-                 ./run-mame.sh -rompath /absolute/path/roms -verifyroms salmndr2
-          ROMs not included. MAME source tag: mame0289
+
+          Usage:
+            ./run-mame.sh -version
+            ./run-mame.sh -listxml salmndr2
+            ./run-mame.sh -rompath /absolute/path/roms -verifyroms salmndr2
+
+          ROMs not included.
+
+          MAME source tag: mame0289
           https://github.com/mamedev/mame/tree/mame0289
           TXT
+
       - name: Verify required driver and runtime metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$BUNDLE"
+
+          ./run-mame.sh -version | tee diagnostics/version.txt
+
+          ./run-mame.sh -listfull > diagnostics/supported_games.txt
+
+          grep -E '^salmndr2[[:space:]]' diagnostics/supported_games.txt
+          grep -E '^konamigx[[:space:]]' diagnostics/supported_games.txt
+
+          ./run-mame.sh -listxml salmndr2 > diagnostics/salmndr2.xml
+
+          ./run-mame.sh -listroms salmndr2 > diagnostics/salmndr2_roms.txt
+
+          ./run-mame.sh -help > diagnostics/help.txt
+
+          LD_LIBRARY_PATH="$PWD/lib" \
+            ldd ./konamigxmame > diagnostics/ldd-bundle.txt
+
+          if grep -q 'not found' diagnostics/ldd-bundle.txt; then
+            exit 1
+          fi
+
+          for id in sexyparo tbyahhoo gokuparo; do
+            grep -E "^${id}[[:space:]]" diagnostics/supported_games.txt \
+              || echo "Optional driver absent: $id"
+          done
+
+          # ROM verification and actual Lua capture
+          # must be performed after download.
+
+      - name: Archive runtime even if validation failed
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -x "$BUNDLE/konamigxmame" ]; then
+            zip -qr "$BUNDLE.zip" "$BUNDLE"
+            sha256sum "$BUNDLE.zip" > "$BUNDLE.zip.sha256"
+          fi
+
+      - name: Collect all diagnostics
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/diagnostics"
+
+          if [ -d "$GITHUB_WORKSPACE/$BUNDLE/diagnostics" ]; then
+
+            mkdir -p "$GITHUB_WORKSPACE/diagnostics/runtime"
+
+            cp -a \
+              "$GITHUB_WORKSPACE/$BUNDLE/diagnostics/." \
+              "$GITHUB_WORKSPACE/diagnostics/runtime/"
+
+          fi
+
+          ls -lh \
+            "$GITHUB_WORKSPACE/$BUNDLE.zip" \
+            "$GITHUB_WORKSPACE/$BUNDLE.zip.sha256" \
+            || true
+
+          printf '%s\n' "$GITHUB_WORKSPACE" \
+            > "$GITHUB_WORKSPACE/diagnostics/workspace.txt"
+
+      - name: Upload runtime
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: konami-gx-mame-linux-x86_64
+          path: '${{ github.workspace }}/konami-gx-mame-linux-x86_64.zip*'
+          if-no-files-found: warn
+          compression-level: 0
+
+      - name: Upload build diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: konami-gx-build-diagnostics
+          path: '${{ github.workspace }}/diagnostics/'
+          if-no-files-found: warn
