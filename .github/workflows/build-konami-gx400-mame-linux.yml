@@ -1,0 +1,295 @@
+name: Build Konami GX400 MAME Linux x86_64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    env:
+      MAME_REF: mame0289
+      SUBTARGET: gx400mame
+      BUNDLE: konami-gx400-mame-linux-x86_64
+
+    steps:
+      - name: Checkout MAME source
+        uses: actions/checkout@v5
+        with:
+          repository: mamedev/mame
+          ref: mame0289
+          path: mame
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            python3 \
+            pkg-config \
+            libsdl2-dev \
+            libsdl2-ttf-dev \
+            libfontconfig-dev \
+            libasound2-dev \
+            libpulse-dev \
+            libpipewire-0.3-dev \
+            libgl1-mesa-dev \
+            libegl1-mesa-dev \
+            libx11-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxrandr-dev \
+            libxext-dev \
+            libpcap-dev \
+            zip \
+            unzip \
+            file
+
+      - name: Prepare output directories
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out/$BUNDLE/lib"
+          mkdir -p "$GITHUB_WORKSPACE/out/$BUNDLE/roms"
+          mkdir -p "$GITHUB_WORKSPACE/out/$BUNDLE/source"
+          mkdir -p "$GITHUB_WORKSPACE/out/$BUNDLE/diagnostics"
+
+      - name: Build GX400 MAME
+        working-directory: mame
+        shell: bash
+        run: |
+          set -o pipefail
+
+          make -j2 \
+            SUBTARGET="$SUBTARGET" \
+            SOURCES=src/mame/konami/nemesis.cpp \
+            REGENIE=1 \
+            USE_QTDEBUG=0 \
+            SYMBOLS=0 \
+            TOOLS=0 \
+            2>&1 | tee \
+            "$GITHUB_WORKSPACE/out/$BUNDLE/diagnostics/build.log"
+
+          test -x "$SUBTARGET"
+
+      - name: Package executable and dependencies
+        working-directory: mame
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEST="$GITHUB_WORKSPACE/out/$BUNDLE"
+
+          cp "$SUBTARGET" "$DEST/"
+          chmod +x "$DEST/$SUBTARGET"
+
+          ldd "$SUBTARGET" > "$DEST/diagnostics/ldd-original.txt"
+
+          if grep -q "not found" "$DEST/diagnostics/ldd-original.txt"; then
+            cat "$DEST/diagnostics/ldd-original.txt"
+            exit 1
+          fi
+
+          while IFS= read -r LIB; do
+            NAME="$(basename "$LIB")"
+
+            case "$NAME" in
+              libc.so*|libm.so*|libpthread.so*|\
+              libdl.so*|librt.so*|ld-linux*|\
+              libresolv.so*|libutil.so*)
+                continue
+                ;;
+            esac
+
+            cp -L "$LIB" "$DEST/lib/$NAME"
+
+          done < <(
+            ldd "$SUBTARGET" |
+            awk '$2 == "=>" && $3 ~ /^\// {print $3}' |
+            sort -u
+          )
+
+          for DIR in bgfx plugins language; do
+            if [ -d "$DIR" ]; then
+              cp -a "$DIR" "$DEST/"
+            fi
+          done
+
+          for FILE in COPYING LICENSE README.md; do
+            if [ -f "$FILE" ]; then
+              cp "$FILE" "$DEST/"
+            fi
+          done
+
+          git rev-parse HEAD \
+            > "$DEST/diagnostics/mame_commit.txt"
+
+          git describe --tags --always \
+            > "$DEST/diagnostics/mame_ref.txt"
+
+          file "$DEST/$SUBTARGET" \
+            > "$DEST/diagnostics/file.txt"
+
+      - name: Package analysis source files
+        working-directory: mame
+        shell: bash
+        run: |
+          DEST="$GITHUB_WORKSPACE/out/$BUNDLE"
+
+          mkdir -p "$DEST/source/konami"
+          mkdir -p "$DEST/source/sound"
+
+          cp src/mame/konami/nemesis* \
+            "$DEST/source/konami/"
+
+          for CHIP in \
+            ay8910 \
+            k005289 \
+            vlm5030 \
+            flt_rc \
+            k007232 \
+            k051649 \
+            ymopm \
+            ymopl
+          do
+            for EXT in cpp h; do
+              FILE="src/devices/sound/$CHIP.$EXT"
+
+              if [ -f "$FILE" ]; then
+                cp "$FILE" "$DEST/source/sound/"
+              fi
+            done
+          done
+
+      - name: Create runtime launcher
+        shell: bash
+        run: |
+          DEST="$GITHUB_WORKSPACE/out/$BUNDLE"
+
+          cat > "$DEST/run-mame.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -e
+
+          HERE="$(cd "$(dirname "$0")" && pwd)"
+
+          export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          export SDL_AUDIODRIVER="${SDL_AUDIODRIVER:-dummy}"
+          export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}"
+
+          cd "$HERE"
+
+          exec "$HERE/gx400mame" "$@"
+          EOF
+
+          chmod +x "$DEST/run-mame.sh"
+
+      - name: Verify runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEST="$GITHUB_WORKSPACE/out/$BUNDLE"
+
+          cd "$DEST"
+
+          ./run-mame.sh -version \
+            | tee diagnostics/version.txt
+
+          ./run-mame.sh -listfull \
+            > diagnostics/supported_games.txt
+
+          ./run-mame.sh -listroms gradius \
+            > diagnostics/gradius_roms.txt
+
+          ./run-mame.sh -listxml gradius \
+            > diagnostics/gradius.xml
+
+          grep -E '^gradius[[:space:]]' \
+            diagnostics/supported_games.txt
+
+          grep -E '^twinbee[[:space:]]' \
+            diagnostics/supported_games.txt
+
+          grep -E '^salamand[[:space:]]' \
+            diagnostics/supported_games.txt
+
+          grep -E '^lifefrcj[[:space:]]' \
+            diagnostics/supported_games.txt
+
+          LD_LIBRARY_PATH="$DEST/lib" \
+            ldd ./gx400mame \
+            > diagnostics/ldd-bundle.txt
+
+          if grep -q "not found" diagnostics/ldd-bundle.txt; then
+            cat diagnostics/ldd-bundle.txt
+            exit 1
+          fi
+
+      - name: Create README
+        shell: bash
+        run: |
+          DEST="$GITHUB_WORKSPACE/out/$BUNDLE"
+
+          cat > "$DEST/README.txt" <<'EOF'
+          Konami GX400 MAME Linux x86_64
+          MAME version: 0.289
+          Subtarget: gx400mame
+          Driver: src/mame/konami/nemesis.cpp
+
+          Intended for game audio analysis.
+
+          Test:
+            ./run-mame.sh -version
+            ./run-mame.sh -listfull
+
+          ROM verification:
+            ./run-mame.sh -verifyroms gradius
+
+          Headless execution:
+            ./run-mame.sh gradius -video none -sound none
+
+          Lua capture:
+            ./run-mame.sh gradius -video none \
+              -autoboot_script capture.lua \
+              -autoboot_delay 0
+
+          ROM files are not included.
+          EOF
+
+      - name: Create final ZIP
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE/out"
+
+          zip -q -r -9 "$BUNDLE.zip" "$BUNDLE"
+
+          sha256sum "$BUNDLE.zip" \
+            > "$BUNDLE.zip.sha256"
+
+          unzip -tq "$BUNDLE.zip"
+
+          ls -lh "$BUNDLE.zip"
+
+      - name: Upload runtime artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: konami-gx400-mame-linux-x86_64
+          path: |
+            out/konami-gx400-mame-linux-x86_64.zip
+            out/konami-gx400-mame-linux-x86_64.zip.sha256
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: gx400-build-failure-diagnostics
+          path: out/konami-gx400-mame-linux-x86_64/diagnostics/
+          retention-days: 7
+          if-no-files-found: ignore
