@@ -62,7 +62,7 @@ jobs:
         working-directory: mame
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
 
           make -j2 \
             SUBTARGET="$SUBTARGET" \
@@ -138,6 +138,8 @@ jobs:
         working-directory: mame
         shell: bash
         run: |
+          set -euo pipefail
+
           DEST="$GITHUB_WORKSPACE/out/$BUNDLE"
 
           mkdir -p "$DEST/source/konami"
@@ -168,6 +170,8 @@ jobs:
       - name: Create runtime launcher
         shell: bash
         run: |
+          set -euo pipefail
+
           DEST="$GITHUB_WORKSPACE/out/$BUNDLE"
 
           cat > "$DEST/run-mame.sh" <<'EOF'
@@ -208,17 +212,38 @@ jobs:
           ./run-mame.sh -listxml gradius \
             > diagnostics/gradius.xml
 
-          grep -E '^gradius[[:space:]]' \
-            diagnostics/supported_games.txt
+          echo "Checking required target: Gradius"
 
-          grep -E '^twinbee[[:space:]]' \
-            diagnostics/supported_games.txt
+          if ! grep -E '^gradius[[:space:]]' \
+            diagnostics/supported_games.txt; then
+            echo "::error::Required game gradius is missing."
+            exit 1
+          fi
 
-          grep -E '^salamand[[:space:]]' \
-            diagnostics/supported_games.txt
+          echo "Checking optional GX400 titles"
 
-          grep -E '^lifefrcj[[:space:]]' \
-            diagnostics/supported_games.txt
+          for GAME in \
+            twinbee \
+            nemesis \
+            salamand \
+            salamandj \
+            lifefrce \
+            lifefrcej \
+            gwarrior \
+            konamigt \
+            rf2 \
+            blkpnthr \
+            citybomb \
+            hcrash \
+            nyanpani
+          do
+            if grep -E "^${GAME}[[:space:]]" \
+              diagnostics/supported_games.txt; then
+              echo "PASS: $GAME"
+            else
+              echo "::warning::Optional game ID not found: $GAME"
+            fi
+          done
 
           LD_LIBRARY_PATH="$DEST/lib" \
             ldd ./gx400mame \
@@ -229,18 +254,32 @@ jobs:
             exit 1
           fi
 
+          echo "Required runtime checks passed."
+
       - name: Create README
         shell: bash
         run: |
+          set -euo pipefail
+
           DEST="$GITHUB_WORKSPACE/out/$BUNDLE"
 
           cat > "$DEST/README.txt" <<'EOF'
           Konami GX400 MAME Linux x86_64
+
           MAME version: 0.289
           Subtarget: gx400mame
           Driver: src/mame/konami/nemesis.cpp
 
           Intended for game audio analysis.
+
+          Supported hardware and sound devices:
+            AY-3-8910
+            Konami K005289
+            VLM5030
+            YM2151
+            K007232
+            K051649
+            RC filters
 
           Test:
             ./run-mame.sh -version
@@ -252,10 +291,17 @@ jobs:
           Headless execution:
             ./run-mame.sh gradius -video none -sound none
 
+          Audio recording:
+            ./run-mame.sh gradius -video none \
+              -wavwrite gradius.wav
+
           Lua capture:
             ./run-mame.sh gradius -video none \
               -autoboot_script capture.lua \
               -autoboot_delay 0
+
+          Supported game IDs are listed in:
+            diagnostics/supported_games.txt
 
           ROM files are not included.
           EOF
@@ -263,6 +309,8 @@ jobs:
       - name: Create final ZIP
         shell: bash
         run: |
+          set -euo pipefail
+
           cd "$GITHUB_WORKSPACE/out"
 
           zip -q -r -9 "$BUNDLE.zip" "$BUNDLE"
@@ -291,5 +339,16 @@ jobs:
         with:
           name: gx400-build-failure-diagnostics
           path: out/konami-gx400-mame-linux-x86_64/diagnostics/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Recover compiled binary on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: gx400-recovery-binary
+          path: |
+            mame/gx400mame
+            out/konami-gx400-mame-linux-x86_64/
           retention-days: 7
           if-no-files-found: ignore
